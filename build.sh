@@ -3,7 +3,8 @@
 rm -rf ./bin
 mkdir ./bin
 
-golocation="/usr/local/go/bin/go"
+# golocation="/usr/local/go/bin/go"
+golocation="go"
 # golocation=$(which go) # for local
 echo $golocation
 
