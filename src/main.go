@@ -85,6 +85,7 @@ type LogRecord struct {
 func newLogRecord(peers map[string]Node) *LogRecord {
 	TimeVector := make(map[string]map[string]int)
 	for site_i := range peers {
+		TimeVector[site_i] = make(map[string]int)
 		for site_j := range peers {
 			TimeVector[site_i][site_j] = 0
 		}
@@ -131,7 +132,8 @@ func newServer(site_id string, peers Map) *Server {
 		if err_unmarshal != nil {
 			log.Fatalf("stable_storage unmarshal error: %v\n", err_unmarshal)
 		}
-		fmt.Printf("record_file.Close(): %v\n", record_file.Close())
+		record_file.Close()
+		// fmt.Printf("record_file.Close(): %v\n", record_file.Close())
 	} else {
 		record = *newLogRecord(peers.Hosts)
 	}
@@ -278,10 +280,22 @@ func get_sorted_keys(dictionary *map[string]Order) []string {
 	return names
 }
 
+func get_sorted_keys_time_vector(TimeVector *map[string]map[string]int) []string {
+
+	names := make([]string, len(*TimeVector))
+	idx := 0
+	for key := range *TimeVector {
+		names[idx] = key
+		idx += 1
+	}
+	sort.Strings(names)
+	return names
+}
+
 func (srv *Server) handle_list_orders() {
 	names := get_sorted_keys(&srv.record.Dictionary)
 	for _, key := range names {
-		fmt.Fprintf(os.Stdin, "%s %s %s\n",
+		fmt.Fprintf(os.Stdout, "%s %s %s\n",
 			key, amountsStr(srv.record.Dictionary[key].Amounts),
 			strStatus(srv.record.Dictionary[key].Status))
 	}
@@ -289,7 +303,7 @@ func (srv *Server) handle_list_orders() {
 
 func (srv *Server) handle_list_inventory() {
 	for idx, val := range item_names {
-		fmt.Fprintf(os.Stdin, "%s %d\n",
+		fmt.Fprintf(os.Stdout, "%s %d\n",
 			val, srv.record.Amounts[idx])
 	}
 }
@@ -320,7 +334,8 @@ func (srv *Server) handle_send_to_site_id(site_id string) {
 	if err != nil {
 		log.Fatalf("udp Write error: %v\n", err)
 	}
-	fmt.Printf("conn.Close(): %v\n", conn.Close())
+	conn.Close()
+	// fmt.Printf("conn.Close(): %v\n", conn.Close())
 }
 
 func (srv *Server) handle_sendall() {
@@ -332,23 +347,26 @@ func (srv *Server) handle_sendall() {
 func (srv *Server) handle_list_log() {
 	for _, event := range srv.record.PartialLog {
 		if event.Type == logOrder {
-			fmt.Fprintf(os.Stdin, "order %s %s\n",
+			fmt.Fprintf(os.Stdout, "order %s %s\n",
 				event.Name, amountsStr(event.Amounts))
 		} else {
-			fmt.Fprintf(os.Stdin, "cancel %s\n", event.Name)
+			fmt.Fprintf(os.Stdout, "cancel %s\n", event.Name)
 		}
 	}
 }
 
 func (srv *Server) handle_list_clock() {
-	names := get_sorted_keys(&srv.record.Dictionary)
-	ret := make([][]int, len(names))
-
+	names := get_sorted_keys_time_vector(&srv.record.TimeVector)
+	clk := make([][]string, len(names))
 	for i, site_i := range names {
-		ret[i] = make([]int, len(names))
+		clk[i] = make([]string, len(names))
 		for j, site_j := range names {
-			ret[i][j] = srv.record.TimeVector[site_i][site_j]
+			clk[i][j] = fmt.Sprintf("%d",
+				srv.record.TimeVector[site_i][site_j])
 		}
+	}
+	for _, row := range clk {
+		fmt.Fprintln(os.Stdout, strings.Join(row, " "))
 	}
 }
 
@@ -442,22 +460,26 @@ func (srv *Server) handle_receive(mesg *Message) {
 		}
 	}
 
+	srv.dump_to_stable_storage()
+
 }
 
 func (srv *Server) dump_to_stable_storage() {
 	record_file, err := os.OpenFile("stable_storage.json",
-		os.O_TRUNC|os.O_WRONLY, os.ModeAppend)
+		os.O_TRUNC|os.O_WRONLY|os.O_CREATE, os.ModeAppend)
 	if err != nil {
 		log.Fatalf("stable_storage.json open error: %v\n", err)
 	}
 
-	b := make([]byte, max_dump_size)
-	json.Unmarshal(b, &srv.record)
+	b, err := json.Marshal(&srv.record)
+	if err != nil {
+		log.Fatalf("server record marshal error: %v\n", err)
+	}
 	_, err = record_file.Write(b)
 	if err != nil {
 		log.Fatalf("stable_storage.json write error: %v\n", err)
 	}
-	fmt.Printf("record_file.Close(): %v\n", record_file.Close())
+	record_file.Close()
 }
 
 func (srv *Server) on_user_input(user_input string) {
@@ -538,7 +560,8 @@ func (srv *Server) on_user_input(user_input string) {
 		}
 	} else if args[0] == "quit" {
 		srv.dump_to_stable_storage()
-		return // EXIT POINT
+		os.Exit(0)
+		// return // EXIT POINT
 	} else {
 		fmt.Println("invalid command")
 	}
@@ -581,7 +604,6 @@ func main() {
 	}
 
 	byteArr, _ := ioutil.ReadAll(knownhosts_f)
-	fmt.Printf("knownhosts_f.Close(): %v\n", knownhosts_f.Close())
 	var peers Map
 	err = json.Unmarshal(byteArr, &peers)
 	if err != nil {
