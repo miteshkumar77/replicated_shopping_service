@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -18,12 +19,29 @@ const timeout = time.Duration(250 * time.Millisecond)
 const max_pkt_size = 1024
 const max_dump_size = 1000000
 
+var item_names = [4]string{
+	"surgical masks",
+	"hand sanitizer bottles",
+	"toilet paper rolls",
+	"reese's peanut butter cups"}
+
 type StatusCode int
 
 const (
 	filled StatusCode = iota
 	pending
 )
+
+func strStatus(sc StatusCode) string {
+	switch sc {
+	case filled:
+		return "filled"
+	case pending:
+		return "pending"
+	default:
+		return ""
+	}
+}
 
 type LogEntryType int
 
@@ -80,9 +98,9 @@ func newLogRecord(peers map[string]Node) *LogRecord {
 }
 
 type Message struct {
-	NP     []LogEntry `json:"np"`
-	T      [][]int    `json:"t"`
-	Sender string     `json:"sender"`
+	NP     []LogEntry                `json:"np"`
+	T      map[string]map[string]int `json:"t"`
+	Sender string                    `json:"sender"`
 }
 
 type Server struct {
@@ -94,6 +112,13 @@ type Server struct {
 	record     LogRecord
 }
 
+func amountsStr(amounts [4]int) string {
+	var amountsStrVec [4]string
+	for i := 0; i < 4; i++ {
+		amountsStrVec[i] = fmt.Sprint(amounts[i])
+	}
+	return strings.Join(amountsStrVec[:], ",")
+}
 func newServer(site_id string, peers Map) *Server {
 	var record LogRecord
 	record_file, err := os.Open("stable_storage.json")
@@ -177,14 +202,28 @@ func (srv *Server) curr_time() int {
 	return srv.record.TimeVector[srv.site_id][srv.site_id]
 }
 
-func (srv *Server) handle_order(name string, amounts [4]int) {
+func (srv *Server) issue_order(amounts [4]int) {
+	for i := 0; i < 4; i++ {
+		srv.record.Amounts[i] -= amounts[i]
+	}
+}
+
+func (srv *Server) sufficient_resources(amounts [4]int) bool {
+
 	for i := 0; i < 4; i++ {
 		if amounts[i] > srv.record.Amounts[i] {
-			fmt.Fprintf(os.Stdout, "Cannot place order for %s.\n", name)
-			return
+			return false
 		}
 	}
+	return true
+}
 
+func (srv *Server) handle_order(name string, amounts [4]int) {
+
+	if !srv.sufficient_resources(amounts) {
+		fmt.Fprintf(os.Stdout, "Cannot place order for %s.\n", name)
+		return
+	}
 	srv.clock_tick()
 
 	srv.record.Dictionary[name] = Order{
@@ -223,28 +262,186 @@ func (srv *Server) handle_cancel(name string) {
 	fmt.Fprintf(os.Stdout, "Reservation for %s cancelled.\n", name)
 }
 
+func (srv *Server) has_rec(entry *LogEntry, recipient string) bool {
+	return srv.record.TimeVector[recipient][entry.Site] >= entry.Time
+}
+
+func get_sorted_keys(dictionary *map[string]Order) []string {
+
+	names := make([]string, len(*dictionary))
+	idx := 0
+	for key := range *dictionary {
+		names[idx] = key
+		idx += 1
+	}
+	sort.Strings(names)
+	return names
+}
+
 func (srv *Server) handle_list_orders() {
-	fmt.Println("orders")
+	names := get_sorted_keys(&srv.record.Dictionary)
+	for _, key := range names {
+		fmt.Fprintf(os.Stdin, "%s %s %s\n",
+			key, amountsStr(srv.record.Dictionary[key].Amounts),
+			strStatus(srv.record.Dictionary[key].Status))
+	}
 }
 
 func (srv *Server) handle_list_inventory() {
-	fmt.Println("inventory")
+	for idx, val := range item_names {
+		fmt.Fprintf(os.Stdin, "%s %d\n",
+			val, srv.record.Amounts[idx])
+	}
 }
 
+func (srv *Server) filter_log(log *[]LogEntry, recipient_id string) []LogEntry {
+	ret := make([]LogEntry, 0)
+	for _, event := range *log {
+		if !srv.has_rec(&event, recipient_id) {
+			ret = append(ret, event)
+		}
+	}
+	return ret
+}
 func (srv *Server) handle_send_to_site_id(site_id string) {
-	fmt.Printf("send %s\n", site_id)
+	NP := srv.filter_log(&srv.record.PartialLog, site_id)
+	m := Message{NP: NP,
+		T:      srv.record.TimeVector,
+		Sender: srv.site_id}
+	b, err := json.Marshal(&m)
+	if err != nil {
+		log.Fatalf("Message Marshal error: %v\n", err)
+	}
+	conn, err := net.Dial("udp", srv.peer_addrs[site_id].String())
+	if err != nil {
+		log.Fatalf("udp Dial error: %v\n", err)
+	}
+	_, err = conn.Write(b)
+	if err != nil {
+		log.Fatalf("udp Write error: %v\n", err)
+	}
+	fmt.Printf("conn.Close(): %v\n", conn.Close())
 }
 
 func (srv *Server) handle_sendall() {
-	fmt.Println("sendall")
+	for site_id := range srv.peers {
+		srv.handle_send_to_site_id(site_id)
+	}
 }
 
 func (srv *Server) handle_list_log() {
-	fmt.Println("log")
+	for _, event := range srv.record.PartialLog {
+		if event.Type == logOrder {
+			fmt.Fprintf(os.Stdin, "order %s %s\n",
+				event.Name, amountsStr(event.Amounts))
+		} else {
+			fmt.Fprintf(os.Stdin, "cancel %s\n", event.Name)
+		}
+	}
 }
 
 func (srv *Server) handle_list_clock() {
-	fmt.Println("clock")
+	names := get_sorted_keys(&srv.record.Dictionary)
+	ret := make([][]int, len(names))
+
+	for i, site_i := range names {
+		ret[i] = make([]int, len(names))
+		for j, site_j := range names {
+			ret[i][j] = srv.record.TimeVector[site_i][site_j]
+		}
+	}
+}
+
+func (srv *Server) filtered_dictionary(NE *[]LogEntry) map[string]Order {
+	to_delete := make(map[string]bool)
+	for _, event := range *NE {
+		if event.Type == logCancel {
+			to_delete[event.Name] = true
+		}
+	}
+	result := make(map[string]Order)
+	for name, order := range srv.record.Dictionary {
+		if _, exists := to_delete[name]; !exists {
+			result[name] = order
+		}
+	}
+	for _, event := range *NE {
+		if _, exists := to_delete[event.Name]; !exists {
+			result[event.Name] = Order{Amounts: event.Amounts, Status: pending}
+		}
+	}
+	return result
+}
+func (srv *Server) can_delete_event(event *LogEntry) bool {
+	for recipient_id := range srv.record.TimeVector {
+		if !srv.has_rec(event, recipient_id) {
+			return false
+		}
+	}
+	return true
+}
+func (srv *Server) prune_log(NE *[]LogEntry) ([]LogEntry, []string) {
+	deletable := make([]string, 0)
+	result := make([]LogEntry, 0)
+	for _, event := range srv.record.PartialLog {
+		if srv.can_delete_event(&event) {
+			deletable = append(deletable, event.Name)
+		} else {
+			result = append(result, event)
+		}
+	}
+
+	for _, event := range *NE {
+		if srv.can_delete_event(&event) {
+			deletable = append(deletable, event.Name)
+		} else {
+			result = append(result, event)
+		}
+	}
+
+	return result, deletable
+}
+
+func max(a int, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func (srv *Server) handle_receive(mesg *Message) {
+
+	NE := srv.filter_log(&mesg.NP, srv.site_id)
+	srv.record.Dictionary = srv.filtered_dictionary(&NE)
+
+	for r := range srv.record.TimeVector {
+		srv.record.TimeVector[srv.site_id][r] =
+			max(srv.record.TimeVector[srv.site_id][r],
+				mesg.T[mesg.Sender][r])
+	}
+
+	for r := range srv.record.TimeVector {
+		for s := range srv.record.TimeVector {
+			srv.record.TimeVector[r][s] =
+				max(srv.record.TimeVector[r][s],
+					mesg.T[r][s])
+		}
+	}
+
+	pruned, deletable := srv.prune_log(&NE)
+	srv.record.PartialLog = pruned
+	for _, name := range deletable {
+		if order, exists := srv.record.Dictionary[name]; exists {
+			if srv.sufficient_resources(order.Amounts) {
+				srv.issue_order(order.Amounts)
+				order.Status = filled
+				srv.record.Dictionary[name] = order
+			} else {
+				srv.handle_cancel(name)
+			}
+		}
+	}
+
 }
 
 func (srv *Server) dump_to_stable_storage() {
@@ -261,10 +458,6 @@ func (srv *Server) dump_to_stable_storage() {
 		log.Fatalf("stable_storage.json write error: %v\n", err)
 	}
 	fmt.Printf("record_file.Close(): %v\n", record_file.Close())
-}
-
-func (srv *Server) handle_receive(mesg *Message) {
-	fmt.Println("receive")
 }
 
 func (srv *Server) on_user_input(user_input string) {
