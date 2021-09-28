@@ -25,6 +25,8 @@ var item_names = [4]string{
 	"toilet paper rolls",
 	"reese's peanut butter cups"}
 
+var original_amounts = [4]int{500, 100, 200, 200}
+
 type StatusCode int
 
 const (
@@ -420,6 +422,18 @@ func (srv *Server) prune_log(NE *[]LogEntry) ([]LogEntry, []string) {
 	return result, deletable
 }
 
+func (srv *Server) calc_iventory() [4]int {
+	res := [4]int{500, 100, 200, 200}
+	for _, value := range srv.record.Dictionary {
+		if value.Status == filled {
+			for idx := 0; idx < 4; idx++ {
+				res[idx] -= value.Amounts[idx]
+			}
+		}
+	}
+	return res
+}
+
 func max(a int, b int) int {
 	if a > b {
 		return a
@@ -431,6 +445,7 @@ func (srv *Server) handle_receive(mesg *Message) {
 
 	NE := srv.filter_log(&mesg.NP, srv.site_id)
 	srv.record.Dictionary = srv.filtered_dictionary(&NE)
+	srv.record.Amounts = srv.calc_iventory()
 
 	for r := range srv.record.TimeVector {
 		srv.record.TimeVector[srv.site_id][r] =
