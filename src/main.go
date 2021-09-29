@@ -12,11 +12,12 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 )
 
-const timeout = time.Duration(250 * time.Millisecond)
+// largest udp packet data size
 const max_pkt_size = 1024
+
+// largest dictionary+log+clock json dump size
 const max_dump_size = 1000000
 
 var item_names = [4]string{
@@ -27,6 +28,7 @@ var item_names = [4]string{
 
 var original_amounts = [4]int{500, 100, 200, 200}
 
+// StatusCode is the code for a order status in the dictionary
 type StatusCode int
 
 const (
@@ -45,6 +47,8 @@ func strStatus(sc StatusCode) string {
 	}
 }
 
+// LogEntryType is the op-code for the log event
+// logOrder <-> insert(x); logCancel <-> delete(x)
 type LogEntryType int
 
 const (
@@ -52,6 +56,8 @@ const (
 	logCancel
 )
 
+// Node is a struct used for unmarshalling networking
+// configurations from knownhosts.json for a single node
 type Node struct {
 	TcpStartPort int    `json:"tcp_start_port"`
 	TcpEndPort   int    `json:"tcp_end_port"`
@@ -60,15 +66,19 @@ type Node struct {
 	IpAddress    string `json:"ip_address"`
 }
 
+// Map is a struct used for unmarshalling networking
+// configurations from knownhosts.json for all nodes
 type Map struct {
 	Hosts map[string]Node `json:"hosts"`
 }
 
+// Order is a dictionary entry in the wuu-bernstein algorithm
 type Order struct {
 	Amounts [4]int     `json:"amounts"`
 	Status  StatusCode `json:"status"`
 }
 
+// LogEntry is an event in the log for the wuu-bernstein algorithm
 type LogEntry struct {
 	Type    LogEntryType `json:"type"`
 	Name    string       `json:"name"`
@@ -77,6 +87,8 @@ type LogEntry struct {
 	Site    string       `json:"site"`
 }
 
+// LogRecord stores all state required by the wuu-bernstein algorithm
+// and can be loaded/unloaded from a json dump.
 type LogRecord struct {
 	Dictionary map[string]Order          `json:"dictionary"`
 	PartialLog []LogEntry                `json:"partial_log"`
@@ -84,6 +96,8 @@ type LogRecord struct {
 	Amounts    [4]int                    `json:"amounts"`
 }
 
+// newLogRecord creates a blank LogRecord struct.
+// Is meant to be used when a dump file doesn't already exist.
 func newLogRecord(peers map[string]Node) *LogRecord {
 	TimeVector := make(map[string]map[string]int)
 	for site_i := range peers {
@@ -100,12 +114,19 @@ func newLogRecord(peers map[string]Node) *LogRecord {
 		Amounts:    [4]int{500, 100, 200, 200}}
 }
 
+// Message is the format of the messages that
+// are exchanged by the nodes via UDP
 type Message struct {
 	NP     []LogEntry                `json:"np"`
 	T      map[string]map[string]int `json:"t"`
 	Sender string                    `json:"sender"`
 }
 
+// Server is instantiated and run by each node participating
+// in the wuu-bernstein algorithm. It encapsulates the
+// LogRecord, standard input listener, udp network listener,
+// and the UDP addressing information. Contains handlers
+// for all of the different UI components.
 type Server struct {
 	site_id    string
 	peers      map[string]Node
@@ -115,6 +136,8 @@ type Server struct {
 	record     LogRecord
 }
 
+// amountsStr converts an array of 4 integers representing
+// the inventory to a comma delimited string.
 func amountsStr(amounts [4]int) string {
 	var amountsStrVec [4]string
 	for i := 0; i < 4; i++ {
@@ -122,6 +145,11 @@ func amountsStr(amounts [4]int) string {
 	}
 	return strings.Join(amountsStrVec[:], ",")
 }
+
+// newServer creates a new Server object for a particular site_id.
+// If it finds a "stable_storage.json" file, it will load the
+// LogRecord contents from there, otherwise it will create
+// a blank LogRecord object.
 func newServer(site_id string, peers Map) *Server {
 	var record LogRecord
 	record_file, err := os.Open("stable_storage.json")
@@ -154,6 +182,9 @@ func newServer(site_id string, peers Map) *Server {
 	return &s
 }
 
+// stdin_read_loop infinitely loops while polling the stdin
+// file descriptor for user input, and passing that to the
+// user channel
 func stdin_read_loop(stdin_c chan string, reader *bufio.Reader) {
 	b := make([]byte, max_pkt_size)
 	for {
@@ -168,6 +199,10 @@ func stdin_read_loop(stdin_c chan string, reader *bufio.Reader) {
 	}
 }
 
+// netwk_read_loop infinitely loops while polling a UDP socket
+// for messages from other nodes. Upon receiving, it will push
+// unmarshal and then push messages to a network message
+// designated channel
 func netwk_read_loop(netwk_c chan Message, reader *net.UDPConn) {
 	b := make([]byte, max_pkt_size)
 	for {
@@ -184,6 +219,8 @@ func netwk_read_loop(netwk_c chan Message, reader *net.UDPConn) {
 	}
 }
 
+// parse a comma separated list of integers
+// into an array of ints
 func parse_int_list(line *string) []int {
 	str_list := strings.Split(*line, ",")
 	arr := make([]int, len(str_list))
@@ -198,20 +235,29 @@ func parse_int_list(line *string) []int {
 	return arr
 }
 
+// clock_tick increments the site's clock
 func (srv *Server) clock_tick() {
 	srv.record.TimeVector[srv.site_id][srv.site_id]++
 }
 
+// curr_time returns the site's clock value
 func (srv *Server) curr_time() int {
 	return srv.record.TimeVector[srv.site_id][srv.site_id]
 }
 
+// issue_order decrements all elements in an inventory
+// by the corresponding values in amounts [4]int.
+// Assumes that this order has already been set to the
+// 'filled' state.
 func (srv *Server) issue_order(amounts [4]int) {
 	for i := 0; i < 4; i++ {
 		srv.record.Amounts[i] -= amounts[i]
 	}
 }
 
+// sufficient_resources checks if the current inventory
+// has sufficient resources for this order with respect
+// to the local node's inventory only
 func (srv *Server) sufficient_resources(amounts [4]int) bool {
 
 	for i := 0; i < 4; i++ {
@@ -222,6 +268,12 @@ func (srv *Server) sufficient_resources(amounts [4]int) bool {
 	return true
 }
 
+// handle_order processes an order request locally.
+// It is called when a user inputs the 'order' command.
+// 1. Checks if sufficient_resources() is true
+// 2. Adds a 'pending' order to the local dictionary
+// 3. Appends 'logOrder' (insert(x)) event to the log
+// 4. Dumps LogRecord contents to stable storage.
 func (srv *Server) handle_order(name string, amounts [4]int) {
 
 	if !srv.sufficient_resources(amounts) {
@@ -247,6 +299,12 @@ func (srv *Server) handle_order(name string, amounts [4]int) {
 	fmt.Fprintf(os.Stdout, "Order submitted for %s.\n", name)
 }
 
+// handle_cancel processes a cancel request locally
+// It is called when a user inputs the 'cancel' command.
+// 1. Checks if the order entry in the dictionary isn't 'filled'
+// 2. Appends a 'logCancel' (delete(x)) event to the log
+// 3. Removes the 'pending' order from the local dictionary
+// 4. Dumps LogRecord contents to stable_storage.
 func (srv *Server) handle_cancel(name string) {
 
 	if srv.record.Dictionary[name].Status == filled {
@@ -266,10 +324,16 @@ func (srv *Server) handle_cancel(name string) {
 	fmt.Fprintf(os.Stdout, "Reservation for %s cancelled.\n", name)
 }
 
+// has_rec is the has_rec helper function described in the wuu-bernstein algorithm
+// It checks whether the local site knows if a recipient site already has
+// a particular event in its log.
 func (srv *Server) has_rec(entry *LogEntry, recipient string) bool {
 	return srv.record.TimeVector[recipient][entry.Site] >= entry.Time
 }
 
+// return the keys of the dictionary sorted lexicographically.
+// i.e. the names of the Orders in the sites dictionary.
+// Used in printing out elements for the 'orders' command.
 func get_sorted_keys(dictionary *map[string]Order) []string {
 
 	names := make([]string, len(*dictionary))
@@ -282,6 +346,8 @@ func get_sorted_keys(dictionary *map[string]Order) []string {
 	return names
 }
 
+// return the keys of the matrix clock sorted lexicographically.
+// Used in printing out the matrix clock for the 'clock' command.
 func get_sorted_keys_time_vector(TimeVector *map[string]map[string]int) []string {
 
 	names := make([]string, len(*TimeVector))
@@ -294,6 +360,9 @@ func get_sorted_keys_time_vector(TimeVector *map[string]map[string]int) []string
 	return names
 }
 
+// handle_list_orders is used to handle the 'orders' command.
+// Lists out the dictionary contents lexicographically ordered
+// by the Name on the order.
 func (srv *Server) handle_list_orders() {
 	names := get_sorted_keys(&srv.record.Dictionary)
 	for _, key := range names {
@@ -303,6 +372,8 @@ func (srv *Server) handle_list_orders() {
 	}
 }
 
+// handle_list_inventory is used to handle the 'inventory' command.
+// Lists the inventory contents.
 func (srv *Server) handle_list_inventory() {
 	for idx, val := range item_names {
 		fmt.Fprintf(os.Stdout, "%s %d\n",
@@ -310,6 +381,9 @@ func (srv *Server) handle_list_inventory() {
 	}
 }
 
+// filter_log is a helper function for sending/receiving messages.
+// For an input recipient_id and a Log, it filters out events from the log
+// that the local site knows the recipient already has.
 func (srv *Server) filter_log(log *[]LogEntry, recipient_id string) []LogEntry {
 	ret := make([]LogEntry, 0)
 	for _, event := range *log {
@@ -319,6 +393,10 @@ func (srv *Server) filter_log(log *[]LogEntry, recipient_id string) []LogEntry {
 	}
 	return ret
 }
+
+// handle_send_to_site_id handles the 'send' command.
+// Filters the log and then sends it and the matrix clock
+// via UDP to the recipient site.
 func (srv *Server) handle_send_to_site_id(site_id string) {
 	NP := srv.filter_log(&srv.record.PartialLog, site_id)
 	m := Message{NP: NP,
@@ -337,15 +415,18 @@ func (srv *Server) handle_send_to_site_id(site_id string) {
 		log.Fatalf("udp Write error: %v\n", err)
 	}
 	conn.Close()
-	// fmt.Printf("conn.Close(): %v\n", conn.Close())
 }
 
+// handle_sendall handles the 'sendall' command.
+// Simply calls handle_send_to_site_id() for all site_ids
 func (srv *Server) handle_sendall() {
 	for site_id := range srv.peers {
 		srv.handle_send_to_site_id(site_id)
 	}
 }
 
+// handle_list_log handles the 'log' command.
+// Prints out all of the log contents.
 func (srv *Server) handle_list_log() {
 	for _, event := range srv.record.PartialLog {
 		if event.Type == logOrder {
@@ -357,6 +438,11 @@ func (srv *Server) handle_list_log() {
 	}
 }
 
+// handle_list_clock handles the 'clock' command.
+// Prints the clock as an NxN matrix where matrix[i][j]
+// is the matrix_clock[site_i][site_j] if
+// site_i = sites[i], site_j = sites[j] and sites is
+// an array of N sites ordered lexicographically.
 func (srv *Server) handle_list_clock() {
 	names := get_sorted_keys_time_vector(&srv.record.TimeVector)
 	clk := make([][]string, len(names))
@@ -372,6 +458,11 @@ func (srv *Server) handle_list_clock() {
 	}
 }
 
+// filtered_dictionary takes a Log that is meant to be
+// appended to the server's local log, and returns a new
+// filtered version of the local server's dictionary that
+// such that no elements in it have a corresponding
+// logCancel event in the Log to be appended.
 func (srv *Server) filtered_dictionary(NE *[]LogEntry) map[string]Order {
 	to_delete := make(map[string]bool)
 	for _, event := range *NE {
@@ -392,6 +483,10 @@ func (srv *Server) filtered_dictionary(NE *[]LogEntry) map[string]Order {
 	}
 	return result
 }
+
+// can_delete_event is a helper function for log truncation.
+// For a log event, it returns whether the site can say for
+// sure that all other sites have the event in their logs.
 func (srv *Server) can_delete_event(event *LogEntry) bool {
 	for recipient_id := range srv.record.TimeVector {
 		if !srv.has_rec(event, recipient_id) {
@@ -400,6 +495,18 @@ func (srv *Server) can_delete_event(event *LogEntry) bool {
 	}
 	return true
 }
+
+// prune_log is a helper function for log truncation.
+// Given a new log to be appended, combined with the server's existing log
+// It returns the appended log with all deletable events removed.
+// It also returns The names of all of the log entries that were deleted.
+// this additional list of names is used to set the status of
+// some 'pending' orders to filled.
+// 1. Get all un-deletable events as well as the names of all deletable events,
+// from the server's original partial log.
+// 2. Get all un-deletable events as well as the names of all deletable events,
+// from the log to append
+// 3. Return the appended corresponding results from step 1, and step 2.
 func (srv *Server) prune_log(NE *[]LogEntry) ([]LogEntry, []string) {
 	deletable := make([]string, 0)
 	result := make([]LogEntry, 0)
@@ -422,6 +529,8 @@ func (srv *Server) prune_log(NE *[]LogEntry) ([]LogEntry, []string) {
 	return result, deletable
 }
 
+// For the current dictionary on the server
+// calculate the inventory values.
 func (srv *Server) calc_iventory() [4]int {
 	res := [4]int{500, 100, 200, 200}
 	for _, value := range srv.record.Dictionary {
@@ -440,6 +549,19 @@ func max(a int, b int) int {
 	}
 	return b
 }
+
+// handle_receive handles a receive of a message from another site.
+// 1. Filter the received log to contain only events that we don't have
+// 2. Filter our own dictionary based on the delete events in this received log
+// 3. Recalculate inventory (we may have deleted some 'filled' orders, in which case
+// those resources must be replenished)
+// 4. Compute the updated matrix clock as done in the wuu-bernstein algorithm.
+// 5. Prune the log (Log Truncation)
+// 6. For all orders that are deletable (i.e. all other sites know of their existence)
+// And are not already deleted from previous steps: if we have sufficient resources
+// apply the order (decrement its resources), otherwise cancel this order
+// i.e. handle_cancel(Order Name)
+// 7. Dump to stable storage.
 
 func (srv *Server) handle_receive(mesg *Message) {
 
