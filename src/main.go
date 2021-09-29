@@ -463,6 +463,9 @@ func (srv *Server) handle_list_clock() {
 // filtered version of the local server's dictionary that
 // such that no elements in it have a corresponding
 // logCancel event in the Log to be appended.
+// We assume that the new log, and our existing log are totally ordered
+// but all the all events are concurrent across the two
+// so we merge them in alphabetical order.
 func (srv *Server) filtered_dictionary(NE *[]LogEntry) map[string]Order {
 	to_delete := make(map[string]bool)
 	for _, event := range *NE {
@@ -496,37 +499,86 @@ func (srv *Server) can_delete_event(event *LogEntry) bool {
 	return true
 }
 
+func merge_log(a *[]LogEntry, b *[]LogEntry) []LogEntry {
+	cmp := func(ae *LogEntry, be *LogEntry) bool {
+		return ae.Name < be.Name || (ae.Name == be.Name && ae.Type == logOrder)
+	}
+	i := 0
+	j := 0
+	n := len(*a)
+	m := len(*b)
+
+	res := make([]LogEntry, n+m)
+	for i < n || j < m {
+		if j >= m || (i < n && cmp(&(*a)[i], &(*b)[j])) {
+			res[i+j] = (*a)[i]
+			i++
+		} else {
+			res[i+j] = (*b)[j]
+			j++
+		}
+	}
+	return res
+}
+
+func merge_deleted(a *[]string, b *[]string) []string {
+
+	cmp := func(ae *string, be *string) bool {
+		return (*ae) < (*be)
+	}
+	i := 0
+	j := 0
+	n := len(*a)
+	m := len(*b)
+
+	res := make([]string, n+m)
+	for i < n || j < m {
+		if j >= m || (i < n && cmp(&(*a)[i], &(*b)[j])) {
+			res[i+j] = (*a)[i]
+			i++
+		} else {
+			res[i+j] = (*b)[j]
+			j++
+		}
+	}
+	return res
+}
+
 // prune_log is a helper function for log truncation.
-// Given a new log to be appended, combined with the server's existing log
-// It returns the appended log with all deletable events removed.
-// It also returns The names of all of the log entries that were deleted.
+// Given a new log to be combined with the server's existing log
+// It returns the merged log with all deletable events removed.
+// It also returns The merged list of names of all of the log entries that were deleted.
 // this additional list of names is used to set the status of
 // some 'pending' orders to filled.
 // 1. Get all un-deletable events as well as the names of all deletable events,
-// from the server's original partial log.
+// from the server's original partial log, while maintaining original order
 // 2. Get all un-deletable events as well as the names of all deletable events,
-// from the log to append
-// 3. Return the appended corresponding results from step 1, and step 2.
+// from the log to append, while maintaining original order
+// 3. merge the corresponding lists with respect to the lexicographical ordering
+//    of the name
 func (srv *Server) prune_log(NE *[]LogEntry) ([]LogEntry, []string) {
-	deletable := make([]string, 0)
-	result := make([]LogEntry, 0)
+	deletable_srv := make([]string, 0)
+	result_srv := make([]LogEntry, 0)
 	for _, event := range srv.record.PartialLog {
 		if srv.can_delete_event(&event) {
-			deletable = append(deletable, event.Name)
+			deletable_srv = append(deletable_srv, event.Name)
 		} else {
-			result = append(result, event)
+			result_srv = append(result_srv, event)
 		}
 	}
 
+	deletable_recv := make([]string, 0)
+	result_recv := make([]LogEntry, 0)
 	for _, event := range *NE {
 		if srv.can_delete_event(&event) {
-			deletable = append(deletable, event.Name)
+			deletable_recv = append(deletable_recv, event.Name)
 		} else {
-			result = append(result, event)
+			result_recv = append(result_recv, event)
 		}
 	}
 
-	return result, deletable
+	return merge_log(&result_srv, &result_recv),
+		merge_deleted(&deletable_srv, &deletable_recv)
 }
 
 // For the current dictionary on the server
