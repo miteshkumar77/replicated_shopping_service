@@ -80,11 +80,12 @@ type Order struct {
 
 // LogEntry is an event in the log for the wuu-bernstein algorithm
 type LogEntry struct {
-	Type    LogEntryType `json:"type"`
-	Name    string       `json:"name"`
-	Amounts [4]int       `json:"amounts"`
-	Time    int          `json:"time"`
-	Site    string       `json:"site"`
+	Type       LogEntryType   `json:"type"`
+	Name       string         `json:"name"`
+	Amounts    [4]int         `json:"amounts"`
+	Time       int            `json:"time"`
+	Site       string         `json:"site"`
+	VectorTime map[string]int `json:"vector_time"`
 }
 
 // LogRecord stores all state required by the wuu-bernstein algorithm
@@ -268,6 +269,14 @@ func (srv *Server) sufficient_resources(amounts [4]int) bool {
 	return true
 }
 
+func (srv *Server) vector_time() map[string]int {
+	ret := make(map[string]int)
+	for k, v := range srv.record.TimeVector[srv.site_id] {
+		ret[k] = v
+	}
+	return ret
+}
+
 // handle_order processes an order request locally.
 // It is called when a user inputs the 'order' command.
 // 1. Checks if sufficient_resources() is true
@@ -288,11 +297,12 @@ func (srv *Server) handle_order(name string, amounts [4]int) {
 
 	srv.record.PartialLog = append(srv.record.PartialLog,
 		LogEntry{
-			Type:    logOrder,
-			Name:    name,
-			Amounts: amounts,
-			Time:    srv.curr_time(),
-			Site:    srv.site_id})
+			Type:       logOrder,
+			Name:       name,
+			Amounts:    amounts,
+			Time:       srv.curr_time(),
+			Site:       srv.site_id,
+			VectorTime: srv.vector_time()})
 
 	srv.dump_to_stable_storage()
 
@@ -314,11 +324,12 @@ func (srv *Server) handle_cancel(name string) {
 	srv.clock_tick()
 	srv.record.PartialLog = append(srv.record.PartialLog,
 		LogEntry{
-			Type:    logCancel,
-			Name:    name,
-			Amounts: [4]int{-1, -1, -1, -1},
-			Time:    srv.curr_time(),
-			Site:    srv.site_id})
+			Type:       logCancel,
+			Name:       name,
+			Amounts:    [4]int{-1, -1, -1, -1},
+			Time:       srv.curr_time(),
+			Site:       srv.site_id,
+			VectorTime: srv.vector_time()})
 	delete(srv.record.Dictionary, name)
 	srv.dump_to_stable_storage()
 	fmt.Fprintf(os.Stdout, "Reservation for %s cancelled.\n", name)
@@ -499,10 +510,23 @@ func (srv *Server) can_delete_event(event *LogEntry) bool {
 	return true
 }
 
-func merge_log(a *[]LogEntry, b *[]LogEntry) []LogEntry {
-	cmp := func(ae *LogEntry, be *LogEntry) bool {
-		return ae.Name < be.Name || (ae.Name == be.Name && ae.Type == logOrder)
+func compare_vector_clock(a *map[string]int, b *map[string]int) bool {
+	neq := false
+	for k, v := range *a {
+		if v > (*b)[k] {
+			return false
+		}
+		neq = neq || v != (*b)[k]
 	}
+	return neq
+}
+
+func compare_log_entry(a *LogEntry, b *LogEntry) bool {
+	return compare_vector_clock(&a.VectorTime, &b.VectorTime) ||
+		(!compare_vector_clock(&b.VectorTime, &a.VectorTime) && a.Name < b.Name)
+}
+
+func merge_log(a *[]LogEntry, b *[]LogEntry) []LogEntry {
 	i := 0
 	j := 0
 	n := len(*a)
@@ -510,7 +534,7 @@ func merge_log(a *[]LogEntry, b *[]LogEntry) []LogEntry {
 
 	res := make([]LogEntry, n+m)
 	for i < n || j < m {
-		if j >= m || (i < n && cmp(&(*a)[i], &(*b)[j])) {
+		if j >= m || (i < n && compare_log_entry(&(*a)[i], &(*b)[j])) {
 			res[i+j] = (*a)[i]
 			i++
 		} else {
@@ -521,27 +545,13 @@ func merge_log(a *[]LogEntry, b *[]LogEntry) []LogEntry {
 	return res
 }
 
-func merge_deleted(a *[]string, b *[]string) []string {
-
-	cmp := func(ae *string, be *string) bool {
-		return (*ae) < (*be)
+func merge_deleted(a *[]LogEntry, b *[]LogEntry) []string {
+	tmp := merge_log(a, b)
+	ret := make([]string, len(tmp))
+	for idx, el := range tmp {
+		ret[idx] = el.Name
 	}
-	i := 0
-	j := 0
-	n := len(*a)
-	m := len(*b)
-
-	res := make([]string, n+m)
-	for i < n || j < m {
-		if j >= m || (i < n && cmp(&(*a)[i], &(*b)[j])) {
-			res[i+j] = (*a)[i]
-			i++
-		} else {
-			res[i+j] = (*b)[j]
-			j++
-		}
-	}
-	return res
+	return ret
 }
 
 // prune_log is a helper function for log truncation.
@@ -557,21 +567,21 @@ func merge_deleted(a *[]string, b *[]string) []string {
 // 3. merge the corresponding lists with respect to the lexicographical ordering
 //    of the name
 func (srv *Server) prune_log(NE *[]LogEntry) ([]LogEntry, []string) {
-	deletable_srv := make([]string, 0)
+	deletable_srv := make([]LogEntry, 0)
 	result_srv := make([]LogEntry, 0)
 	for _, event := range srv.record.PartialLog {
 		if srv.can_delete_event(&event) {
-			deletable_srv = append(deletable_srv, event.Name)
+			deletable_srv = append(deletable_srv, event)
 		} else {
 			result_srv = append(result_srv, event)
 		}
 	}
 
-	deletable_recv := make([]string, 0)
+	deletable_recv := make([]LogEntry, 0)
 	result_recv := make([]LogEntry, 0)
 	for _, event := range *NE {
 		if srv.can_delete_event(&event) {
-			deletable_recv = append(deletable_recv, event.Name)
+			deletable_recv = append(deletable_recv, event)
 		} else {
 			result_recv = append(result_recv, event)
 		}
