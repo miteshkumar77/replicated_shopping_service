@@ -12,3 +12,4 @@ $golocation build -o main ./src/main.go
 
 cp main ./bin/
 cp run.sh ./bin/
+cp stable_storage.json ./bin/
