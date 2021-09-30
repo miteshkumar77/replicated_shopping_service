@@ -24,7 +24,7 @@ var item_names = [4]string{
 	"surgical masks",
 	"hand sanitizer bottles",
 	"toilet paper rolls",
-	"reese's peanut butter cups"}
+	"reese’s peanut butter cups"}
 
 var original_amounts = [4]int{500, 100, 200, 200}
 
