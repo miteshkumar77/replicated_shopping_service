@@ -343,7 +343,7 @@ func (srv *Server) handle_cancel(name string) {
 			VectorTime: srv.vector_time()})
 	delete(srv.record.Dictionary, name)
 	srv.dump_to_stable_storage()
-	fmt.Fprintf(os.Stdout, "Reservation for %s cancelled.\n", name)
+	fmt.Fprintf(os.Stdout, "Order for %s cancelled.\n", name)
 }
 
 // has_rec is the has_rec helper function described in the wuu-bernstein algorithm
