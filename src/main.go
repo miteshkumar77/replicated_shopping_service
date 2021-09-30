@@ -147,33 +147,44 @@ func amountsStr(amounts [4]int) string {
 	return strings.Join(amountsStrVec[:], ",")
 }
 
+// read stable storage
+func read_stable_storage() *LogRecord {
+	record_file, err := os.Open("stable_storage.json")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Open error: %v\n", err)
+		return nil
+	}
+	byteArr, err := ioutil.ReadAll(record_file)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error reading stable_storage.json: %v\n", err)
+		return nil
+	}
+	var record LogRecord
+	err = json.Unmarshal(byteArr, &record)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "stable_storage unmarshal error: %v\n", err)
+		return nil
+	}
+	record_file.Close()
+	return &record
+}
+
 // newServer creates a new Server object for a particular site_id.
 // If it finds a "stable_storage.json" file, it will load the
 // LogRecord contents from there, otherwise it will create
 // a blank LogRecord object.
 func newServer(site_id string, peers Map) *Server {
-	var record LogRecord
-	record_file, err := os.Open("stable_storage.json")
-	if err == nil {
-		byteArr, err_read_json := ioutil.ReadAll(record_file)
-		if err_read_json != nil {
-			log.Fatalf("Error reading stable_storage.json: %v\n", err_read_json)
-		}
-		err_unmarshal := json.Unmarshal(byteArr, &record)
-		if err_unmarshal != nil {
-			log.Fatalf("stable_storage unmarshal error: %v\n", err_unmarshal)
-		}
-		record_file.Close()
-		// fmt.Printf("record_file.Close(): %v\n", record_file.Close())
-	} else {
-		record = *newLogRecord(peers.Hosts)
+	record := read_stable_storage()
+	if record == nil {
+		record = newLogRecord(peers.Hosts)
 	}
+
 	s := Server{site_id: site_id,
 		peers:      peers.Hosts,
 		peer_addrs: make(map[string]*net.UDPAddr),
 		stdin_c:    make(chan string),
 		netwk_c:    make(chan Message),
-		record:     record}
+		record:     *record}
 
 	for id, node := range s.peers {
 		s.peer_addrs[id] = &net.UDPAddr{
@@ -665,7 +676,7 @@ func (srv *Server) handle_receive(mesg *Message) {
 
 func (srv *Server) dump_to_stable_storage() {
 	record_file, err := os.OpenFile("stable_storage.json",
-		os.O_TRUNC|os.O_WRONLY|os.O_CREATE, os.ModeAppend)
+		os.O_TRUNC|os.O_WRONLY, os.ModeAppend)
 	if err != nil {
 		log.Fatalf("stable_storage.json open error: %v\n", err)
 	}
