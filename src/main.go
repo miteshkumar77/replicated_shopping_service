@@ -271,7 +271,6 @@ func (srv *Server) issue_order(amounts [4]int) {
 // has sufficient resources for this order with respect
 // to the local node's inventory only
 func (srv *Server) sufficient_resources(amounts [4]int) bool {
-
 	for i := 0; i < 4; i++ {
 		if amounts[i] > srv.record.Amounts[i] {
 			return false
@@ -280,6 +279,9 @@ func (srv *Server) sufficient_resources(amounts [4]int) bool {
 	return true
 }
 
+// Make a deep copy of the site's own row in its 
+// matrix clock. This is equivalent to the server's
+// own vector clock
 func (srv *Server) vector_time() map[string]int {
 	ret := make(map[string]int)
 	for k, v := range srv.record.TimeVector[srv.site_id] {
