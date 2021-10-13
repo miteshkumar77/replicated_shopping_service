@@ -83,7 +83,6 @@ type LogEntry struct {
 	Type       LogEntryType   `json:"type"`
 	Name       string         `json:"name"`
 	Amounts    [4]int         `json:"amounts"`
-	Time       int            `json:"time"`
 	Site       string         `json:"site"`
 	VectorTime map[string]int `json:"vector_time"`
 }
@@ -311,7 +310,6 @@ func (srv *Server) handle_order(name string, amounts [4]int) {
 			Type:       logOrder,
 			Name:       name,
 			Amounts:    amounts,
-			Time:       srv.curr_time(),
 			Site:       srv.site_id,
 			VectorTime: srv.vector_time()})
 
@@ -338,7 +336,6 @@ func (srv *Server) handle_cancel(name string) {
 			Type:       logCancel,
 			Name:       name,
 			Amounts:    [4]int{-1, -1, -1, -1},
-			Time:       srv.curr_time(),
 			Site:       srv.site_id,
 			VectorTime: srv.vector_time()})
 	delete(srv.record.Dictionary, name)
@@ -350,7 +347,7 @@ func (srv *Server) handle_cancel(name string) {
 // It checks whether the local site knows if a recipient site already has
 // a particular event in its log.
 func (srv *Server) has_rec(entry *LogEntry, recipient string) bool {
-	return srv.record.TimeVector[recipient][entry.Site] >= entry.Time
+	return srv.record.TimeVector[recipient][entry.Site] >= entry.VectorTime[entry.Site]
 }
 
 // return the keys of the dictionary sorted lexicographically.
