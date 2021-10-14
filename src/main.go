@@ -558,52 +558,6 @@ func merge_log(a *[]LogEntry, b *[]LogEntry) []LogEntry {
 	return res
 }
 
-func merge_deleted(a *[]LogEntry, b *[]LogEntry) []string {
-	tmp := merge_log(a, b)
-	ret := make([]string, len(tmp))
-	for idx, el := range tmp {
-		ret[idx] = el.Name
-	}
-	return ret
-}
-
-// prune_log is a helper function for log truncation.
-// Given a new log to be combined with the server's existing log
-// It returns the merged log with all deletable events removed.
-// It also returns The merged list of names of all of the log entries that were deleted.
-// this additional list of names is used to set the status of
-// some 'pending' orders to filled.
-// 1. Get all un-deletable events as well as the names of all deletable events,
-// from the server's original partial log, while maintaining original order
-// 2. Get all un-deletable events as well as the names of all deletable events,
-// from the log to append, while maintaining original order
-// 3. merge the corresponding lists with respect to the lexicographical ordering
-//    of the name
-func (srv *Server) prune_log(NE *[]LogEntry) ([]LogEntry, []string) {
-	deletable_srv := make([]LogEntry, 0)
-	result_srv := make([]LogEntry, 0)
-	for _, event := range srv.record.PartialLog {
-		if srv.can_delete_event(&event) {
-			deletable_srv = append(deletable_srv, event)
-		} else {
-			result_srv = append(result_srv, event)
-		}
-	}
-
-	deletable_recv := make([]LogEntry, 0)
-	result_recv := make([]LogEntry, 0)
-	for _, event := range *NE {
-		if srv.can_delete_event(&event) {
-			deletable_recv = append(deletable_recv, event)
-		} else {
-			result_recv = append(result_recv, event)
-		}
-	}
-
-	return merge_log(&result_srv, &result_recv),
-		merge_deleted(&deletable_srv, &deletable_recv)
-}
-
 // For the current dictionary on the server
 // calculate the inventory values.
 func (srv *Server) calc_inventory() [4]int {
@@ -637,58 +591,6 @@ func max(a int, b int) int {
 // apply the order (decrement its resources), otherwise cancel this order
 // i.e. handle_cancel(Order Name)
 // 7. Dump to stable storage.
-
-// func (srv *Server) handle_receive(mesg *Message) {
-
-// 	NE := srv.filter_log(&mesg.NP, srv.site_id)
-// 	srv.record.Dictionary = srv.filtered_dictionary(&NE)
-// 	srv.record.Amounts = srv.calc_inventory()
-
-// 	for r := range srv.record.TimeVector {
-// 		srv.record.TimeVector[srv.site_id][r] =
-// 			max(srv.record.TimeVector[srv.site_id][r],
-// 				mesg.T[mesg.Sender][r])
-// 	}
-
-// 	for r := range srv.record.TimeVector {
-// 		for s := range srv.record.TimeVector {
-// 			srv.record.TimeVector[r][s] =
-// 				max(srv.record.TimeVector[r][s],
-// 					mesg.T[r][s])
-// 		}
-// 	}
-
-// 	pruned, deletable := srv.prune_log(&NE)
-// 	originalLog := srv.record.PartialLog
-// 	srv.record.PartialLog = pruned
-// 	for _, name := range deletable {
-// 		if order, exists := srv.record.Dictionary[name]; exists {
-// 			if srv.sufficient_resources(order.Amounts) {
-
-// 				// fill the order
-// 				srv.issue_order(order.Amounts)
-// 				order.Status = filled
-// 				srv.record.Dictionary[name] = order
-
-// 				// Add a cancel event for any orders that
-// 				// this "fill" makes ineligible, in causal
-// 				// - lexicographical order.
-// 				for _, entry := range originalLog {
-// 					_, entryExists := srv.record.Dictionary[entry.Name]
-// 					if entryExists && entry.Type == logOrder &&
-// 						!srv.sufficient_resources(entry.Amounts) {
-// 						srv.handle_cancel(entry.Name)
-// 					}
-// 				}
-// 			} else {
-// 				srv.handle_cancel(name)
-// 			}
-// 		}
-// 	}
-
-// 	srv.dump_to_stable_storage()
-// }
-
 func (srv *Server) cancel_all() {
 	to_cancel := make(map[string]bool)
 	for _, entry := range srv.record.PartialLog {
