@@ -83,7 +83,7 @@ type LogEntry struct {
 	Type       LogEntryType   `json:"type"`
 	Name       string         `json:"name"`
 	Amounts    [4]int         `json:"amounts"`
-  Time       int            `json:"time"`
+	Time       int            `json:"time"`
 	Site       string         `json:"site"`
 	VectorTime map[string]int `json:"vector_time"`
 }
@@ -279,7 +279,7 @@ func (srv *Server) sufficient_resources(amounts [4]int) bool {
 	return true
 }
 
-// Make a deep copy of the site's own row in its 
+// Make a deep copy of the site's own row in its
 // matrix clock. This is equivalent to the server's
 // own vector clock
 func (srv *Server) vector_time() map[string]int {
@@ -313,7 +313,7 @@ func (srv *Server) handle_order(name string, amounts [4]int) {
 			Type:       logOrder,
 			Name:       name,
 			Amounts:    amounts,
-      Time:       srv.curr_time(),
+			Time:       srv.curr_time(),
 			Site:       srv.site_id,
 			VectorTime: srv.vector_time()})
 
@@ -340,7 +340,7 @@ func (srv *Server) handle_cancel(name string) {
 			Type:       logCancel,
 			Name:       name,
 			Amounts:    [4]int{-1, -1, -1, -1},
-      Time:       srv.curr_time(),
+			Time:       srv.curr_time(),
 			Site:       srv.site_id,
 			VectorTime: srv.vector_time()})
 	delete(srv.record.Dictionary, name)
@@ -659,13 +659,27 @@ func (srv *Server) handle_receive(mesg *Message) {
 	}
 
 	pruned, deletable := srv.prune_log(&NE)
+	originalLog := srv.record.PartialLog
 	srv.record.PartialLog = pruned
 	for _, name := range deletable {
 		if order, exists := srv.record.Dictionary[name]; exists {
 			if srv.sufficient_resources(order.Amounts) {
+
+				// fill the order
 				srv.issue_order(order.Amounts)
 				order.Status = filled
 				srv.record.Dictionary[name] = order
+
+				// Add a cancel event for any orders that
+				// this "fill" makes ineligible, in causal
+				// - lexicographical order.
+				for _, entry := range originalLog {
+					_, entryExists := srv.record.Dictionary[entry.Name]
+					if entryExists && entry.Type == logOrder &&
+						!srv.sufficient_resources(entry.Amounts) {
+						srv.handle_cancel(entry.Name)
+					}
+				}
 			} else {
 				srv.handle_cancel(name)
 			}
@@ -673,7 +687,6 @@ func (srv *Server) handle_receive(mesg *Message) {
 	}
 
 	srv.dump_to_stable_storage()
-
 }
 
 func (srv *Server) dump_to_stable_storage() {
