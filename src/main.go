@@ -606,7 +606,7 @@ func (srv *Server) prune_log(NE *[]LogEntry) ([]LogEntry, []string) {
 
 // For the current dictionary on the server
 // calculate the inventory values.
-func (srv *Server) calc_iventory() [4]int {
+func (srv *Server) calc_inventory() [4]int {
 	res := [4]int{500, 100, 200, 200}
 	for _, value := range srv.record.Dictionary {
 		if value.Status == filled {
@@ -638,11 +638,120 @@ func max(a int, b int) int {
 // i.e. handle_cancel(Order Name)
 // 7. Dump to stable storage.
 
-func (srv *Server) handle_receive(mesg *Message) {
+// func (srv *Server) handle_receive(mesg *Message) {
 
+// 	NE := srv.filter_log(&mesg.NP, srv.site_id)
+// 	srv.record.Dictionary = srv.filtered_dictionary(&NE)
+// 	srv.record.Amounts = srv.calc_inventory()
+
+// 	for r := range srv.record.TimeVector {
+// 		srv.record.TimeVector[srv.site_id][r] =
+// 			max(srv.record.TimeVector[srv.site_id][r],
+// 				mesg.T[mesg.Sender][r])
+// 	}
+
+// 	for r := range srv.record.TimeVector {
+// 		for s := range srv.record.TimeVector {
+// 			srv.record.TimeVector[r][s] =
+// 				max(srv.record.TimeVector[r][s],
+// 					mesg.T[r][s])
+// 		}
+// 	}
+
+// 	pruned, deletable := srv.prune_log(&NE)
+// 	originalLog := srv.record.PartialLog
+// 	srv.record.PartialLog = pruned
+// 	for _, name := range deletable {
+// 		if order, exists := srv.record.Dictionary[name]; exists {
+// 			if srv.sufficient_resources(order.Amounts) {
+
+// 				// fill the order
+// 				srv.issue_order(order.Amounts)
+// 				order.Status = filled
+// 				srv.record.Dictionary[name] = order
+
+// 				// Add a cancel event for any orders that
+// 				// this "fill" makes ineligible, in causal
+// 				// - lexicographical order.
+// 				for _, entry := range originalLog {
+// 					_, entryExists := srv.record.Dictionary[entry.Name]
+// 					if entryExists && entry.Type == logOrder &&
+// 						!srv.sufficient_resources(entry.Amounts) {
+// 						srv.handle_cancel(entry.Name)
+// 					}
+// 				}
+// 			} else {
+// 				srv.handle_cancel(name)
+// 			}
+// 		}
+// 	}
+
+// 	srv.dump_to_stable_storage()
+// }
+
+func (srv *Server) cancel_all() {
+	to_cancel := make(map[string]bool)
+	for _, entry := range srv.record.PartialLog {
+		_, entryExists := srv.record.Dictionary[entry.Name]
+		if entryExists && entry.Type == logOrder &&
+			!srv.sufficient_resources(entry.Amounts) {
+			to_cancel[entry.Name] = true
+		}
+	}
+	for key := range to_cancel {
+		srv.handle_cancel(key)
+	}
+}
+
+func subtract_amounts(inventory [4]int, amounts [4]int) ([4]int, bool) {
+	ok := true
+	for x := 0; x < 4; x++ {
+		inventory[x] -= amounts[x]
+		ok = ok && inventory[x] >= 0
+	}
+	return inventory, ok
+}
+
+func (srv *Server) can_fill(order_event *LogEntry, event_idx int) bool {
+	_, exists := srv.record.Dictionary[order_event.Name]
+	if !(exists && order_event.Type == logOrder &&
+		srv.can_delete_event(order_event)) {
+		return false
+	}
+
+	amounts, ok := subtract_amounts(srv.calc_inventory(), order_event.Amounts)
+	if !ok {
+		return false
+	}
+	for idx, entry := range srv.record.PartialLog {
+		if idx >= event_idx {
+			break
+		}
+		order, exists := srv.record.Dictionary[entry.Name]
+		if exists && entry.Type == logOrder {
+			amounts, ok = subtract_amounts(amounts, order.Amounts)
+			if !ok {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func (srv *Server) truncated_log() []LogEntry {
+	ret := make([]LogEntry, 0)
+	for _, entry := range srv.record.PartialLog {
+		if !srv.can_delete_event(&entry) {
+			ret = append(ret, entry)
+		}
+	}
+	return ret
+}
+
+func (srv *Server) handle_receive(mesg *Message) {
 	NE := srv.filter_log(&mesg.NP, srv.site_id)
 	srv.record.Dictionary = srv.filtered_dictionary(&NE)
-	srv.record.Amounts = srv.calc_iventory()
+	srv.record.Amounts = srv.calc_inventory()
 
 	for r := range srv.record.TimeVector {
 		srv.record.TimeVector[srv.site_id][r] =
@@ -658,34 +767,49 @@ func (srv *Server) handle_receive(mesg *Message) {
 		}
 	}
 
-	pruned, deletable := srv.prune_log(&NE)
-	originalLog := srv.record.PartialLog
-	srv.record.PartialLog = pruned
-	for _, name := range deletable {
-		if order, exists := srv.record.Dictionary[name]; exists {
-			if srv.sufficient_resources(order.Amounts) {
+	// pruned, deletable := srv.prune_log(&NE)
 
-				// fill the order
-				srv.issue_order(order.Amounts)
-				order.Status = filled
-				srv.record.Dictionary[name] = order
-
-				// Add a cancel event for any orders that
-				// this "fill" makes ineligible, in causal
-				// - lexicographical order.
-				for _, entry := range originalLog {
-					_, entryExists := srv.record.Dictionary[entry.Name]
-					if entryExists && entry.Type == logOrder &&
-						!srv.sufficient_resources(entry.Amounts) {
-						srv.handle_cancel(entry.Name)
-					}
-				}
-			} else {
-				srv.handle_cancel(name)
-			}
+	srv.record.PartialLog = merge_log(&srv.record.PartialLog, &NE)
+	for _, entry := range srv.record.PartialLog {
+		_, exists := srv.record.Dictionary[entry.Name]
+		if exists && entry.Type == logCancel {
+			delete(srv.record.Dictionary, entry.Name)
 		}
 	}
 
+	srv.cancel_all()
+	for {
+		can_continue := false
+		for i, entry := range srv.record.PartialLog {
+			to_break := false
+			if srv.can_fill(&entry, i) {
+				order, _ := srv.record.Dictionary[entry.Name]
+				srv.issue_order(order.Amounts)
+				order.Status = filled
+				srv.record.Dictionary[entry.Name] = order
+				can_continue = true
+				to_break = true
+			}
+			if srv.can_delete_event(&entry) {
+				if len(srv.record.PartialLog) == 1 {
+					srv.record.PartialLog = make([]LogEntry, 0)
+				} else {
+					srv.record.PartialLog =
+						append(srv.record.PartialLog[0:i],
+							srv.record.PartialLog[i+1:]...)
+				}
+			}
+			if to_break {
+				break
+			}
+		}
+		if can_continue {
+			srv.cancel_all()
+		} else {
+			break
+		}
+	}
+	srv.record.PartialLog = srv.truncated_log()
 	srv.dump_to_stable_storage()
 }
 
