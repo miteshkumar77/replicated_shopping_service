@@ -86,6 +86,7 @@ type LogEntry struct {
 	Time       int            `json:"time"`
 	Site       string         `json:"site"`
 	VectorTime map[string]int `json:"vector_time"`
+	LogIndex   int            `json:"log_index"`
 }
 
 // LogRecord stores all state required by the wuu-bernstein algorithm
@@ -315,7 +316,8 @@ func (srv *Server) handle_order(name string, amounts [4]int) {
 			Amounts:    amounts,
 			Time:       srv.curr_time(),
 			Site:       srv.site_id,
-			VectorTime: srv.vector_time()})
+			VectorTime: srv.vector_time(),
+			LogIndex:   len(srv.record.PartialLog)})
 
 	srv.dump_to_stable_storage()
 
@@ -342,7 +344,8 @@ func (srv *Server) handle_cancel(name string) {
 			Amounts:    [4]int{-1, -1, -1, -1},
 			Time:       srv.curr_time(),
 			Site:       srv.site_id,
-			VectorTime: srv.vector_time()})
+			VectorTime: srv.vector_time(),
+			LogIndex:   len(srv.record.PartialLog)})
 	delete(srv.record.Dictionary, name)
 	srv.dump_to_stable_storage()
 	fmt.Fprintf(os.Stdout, "Order for %s cancelled.\n", name)
@@ -452,7 +455,15 @@ func (srv *Server) handle_sendall() {
 // handle_list_log handles the 'log' command.
 // Prints out all of the log contents.
 func (srv *Server) handle_list_log() {
-	for _, event := range srv.record.PartialLog {
+	indices := make([][2]int, 0)
+	for idx, event := range srv.record.PartialLog {
+		indices = append(indices, [2]int{event.LogIndex, idx})
+	}
+	sort.Slice(indices, func(i, j int) bool {
+		return indices[i][0] < indices[j][0]
+	})
+	for _, pr := range indices {
+		event := srv.record.PartialLog[pr[1]]
 		if event.Type == logOrder {
 			fmt.Fprintf(os.Stdout, "order %s %s\n",
 				event.Name, amountsStr(event.Amounts))
@@ -614,6 +625,14 @@ func subtract_amounts(inventory [4]int, amounts [4]int) ([4]int, bool) {
 	return inventory, ok
 }
 
+// check the fill condition for a particular log entry
+// 1. The event has to be an order event
+// 2. The event has to exist in the dictionary
+// 	(i.e. there isn't a corresponding cancel event)
+// 3. The event has to be deletable from the log
+//  (i.e. it exists in the logs of all other machines)
+// 4. There must be enough resources for it if we were to
+//    fill all non-canceled insert events before it in the log
 func (srv *Server) can_fill(order_event *LogEntry, event_idx int) bool {
 	_, exists := srv.record.Dictionary[order_event.Name]
 	if !(exists && order_event.Type == logOrder &&
@@ -640,6 +659,9 @@ func (srv *Server) can_fill(order_event *LogEntry, event_idx int) bool {
 	return true
 }
 
+// return the server's truncated log
+// i.e. the log which does not contain any entries
+// that are known by all other sites
 func (srv *Server) truncated_log() []LogEntry {
 	ret := make([]LogEntry, 0)
 	for _, entry := range srv.record.PartialLog {
@@ -650,8 +672,36 @@ func (srv *Server) truncated_log() []LogEntry {
 	return ret
 }
 
+// handle receive handles the receive of a message from
+// another site
+// 1. compute NE which is the received Log with
+//    events that this site already knows about, filtered out.
+// 2. Delete entries in the dictionary if there exists a
+//    corresponding delete in NE
+// 3. Recalculate inventory values based on this new dictionary
+//    (we may have deleted some 'filled' dictionary entries)
+// 4. Update the matrix clock based on the Wuu Bernstein Algorithm
+// 5. Merge the server's log with NE, while maintaining the
+//    happens before order for non-concurrent events, and
+//    lexicographical order for concurrent events
+// 6. Cancel any events that would create a negative balance
+//    on this site
+// 7. Loop
+//      flag = false
+//		Iterate through each event e in the partial log
+//      	If e is fillable then fill e and set flag to true
+//      	If e is deletable from the log, then delete it ans set flag to true
+//			if flag is true
+//   			break from iteration
+//      if flag is false
+//      	break from loop
+// 8. Truncate the log
 func (srv *Server) handle_receive(mesg *Message) {
 	NE := srv.filter_log(&mesg.NP, srv.site_id)
+	for idx, elem := range NE {
+		elem.LogIndex += len(srv.record.PartialLog)
+		NE[idx] = elem
+	}
 	srv.record.Dictionary = srv.filtered_dictionary(&NE)
 	srv.record.Amounts = srv.calc_inventory()
 
@@ -683,25 +733,20 @@ func (srv *Server) handle_receive(mesg *Message) {
 	for {
 		can_continue := false
 		for i, entry := range srv.record.PartialLog {
-			to_break := false
 			if srv.can_fill(&entry, i) {
 				order, _ := srv.record.Dictionary[entry.Name]
 				srv.issue_order(order.Amounts)
 				order.Status = filled
 				srv.record.Dictionary[entry.Name] = order
 				can_continue = true
-				to_break = true
 			}
 			if srv.can_delete_event(&entry) {
-				if len(srv.record.PartialLog) == 1 {
-					srv.record.PartialLog = make([]LogEntry, 0)
-				} else {
-					srv.record.PartialLog =
-						append(srv.record.PartialLog[0:i],
-							srv.record.PartialLog[i+1:]...)
-				}
+				srv.record.PartialLog =
+					append(srv.record.PartialLog[0:i],
+						srv.record.PartialLog[i+1:]...)
+				can_continue = true
 			}
-			if to_break {
+			if can_continue {
 				break
 			}
 		}
