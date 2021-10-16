@@ -92,10 +92,11 @@ type LogEntry struct {
 // LogRecord stores all state required by the wuu-bernstein algorithm
 // and can be loaded/unloaded from a json dump.
 type LogRecord struct {
-	Dictionary map[string]Order          `json:"dictionary"`
-	PartialLog []LogEntry                `json:"partial_log"`
-	TimeVector map[string]map[string]int `json:"time_vector"`
-	Amounts    [4]int                    `json:"amounts"`
+	Dictionary  map[string]Order          `json:"dictionary"`
+	PartialLog  []LogEntry                `json:"partial_log"`
+	TotalLogLen int                       `json:"total_log_len"`
+	TimeVector  map[string]map[string]int `json:"time_vector"`
+	Amounts     [4]int                    `json:"amounts"`
 }
 
 // newLogRecord creates a blank LogRecord struct.
@@ -110,10 +111,11 @@ func newLogRecord(peers map[string]Node) *LogRecord {
 	}
 
 	return &LogRecord{
-		Dictionary: make(map[string]Order),
-		PartialLog: make([]LogEntry, 0),
-		TimeVector: TimeVector,
-		Amounts:    [4]int{500, 100, 200, 200}}
+		Dictionary:  make(map[string]Order),
+		PartialLog:  make([]LogEntry, 0),
+		TotalLogLen: 0,
+		TimeVector:  TimeVector,
+		Amounts:     [4]int{500, 100, 200, 200}}
 }
 
 // Message is the format of the messages that
@@ -317,7 +319,9 @@ func (srv *Server) handle_order(name string, amounts [4]int) {
 			Time:       srv.curr_time(),
 			Site:       srv.site_id,
 			VectorTime: srv.vector_time(),
-			LogIndex:   len(srv.record.PartialLog)})
+			LogIndex:   srv.record.TotalLogLen})
+
+	srv.record.TotalLogLen++
 
 	srv.dump_to_stable_storage()
 
@@ -345,7 +349,8 @@ func (srv *Server) handle_cancel(name string) {
 			Time:       srv.curr_time(),
 			Site:       srv.site_id,
 			VectorTime: srv.vector_time(),
-			LogIndex:   len(srv.record.PartialLog)})
+			LogIndex:   srv.record.TotalLogLen})
+	srv.record.TotalLogLen++
 	delete(srv.record.Dictionary, name)
 	srv.dump_to_stable_storage()
 	fmt.Fprintf(os.Stdout, "Order for %s cancelled.\n", name)
@@ -625,6 +630,10 @@ func subtract_amounts(inventory [4]int, amounts [4]int) ([4]int, bool) {
 	return inventory, ok
 }
 
+func fill_precedent(a *LogEntry, b *LogEntry) {
+
+}
+
 // check the fill condition for a particular log entry
 // 1. The event has to be an order event
 // 2. The event has to exist in the dictionary
@@ -632,7 +641,10 @@ func subtract_amounts(inventory [4]int, amounts [4]int) ([4]int, bool) {
 // 3. The event has to be deletable from the log
 //  (i.e. it exists in the logs of all other machines)
 // 4. There must be enough resources for it if we were to
-//    fill all non-canceled insert events before it in the log
+//    fill all non-canceled insert events before it
+//    where they are considered to be ordered first by
+//    causal order, and second by lexicographical order
+//    of the site it was made on for concurrent events
 func (srv *Server) can_fill(order_event *LogEntry, event_idx int) bool {
 	_, exists := srv.record.Dictionary[order_event.Name]
 	if !(exists && order_event.Type == logOrder &&
@@ -685,7 +697,7 @@ func (srv *Server) truncated_log() []LogEntry {
 //    happens before order for non-concurrent events, and
 //    lexicographical order for concurrent events
 // 6. Cancel any events that would create a negative balance
-//    on this site
+//    on this site, if applied alone
 // 7. Loop
 //      flag = false
 //		Iterate through each event e in the partial log
@@ -695,11 +707,13 @@ func (srv *Server) truncated_log() []LogEntry {
 //   			break from iteration
 //      if flag is false
 //      	break from loop
+//      Cancel any events that would create a negative balance
+//      on this site, if applied alone
 // 8. Truncate the log
 func (srv *Server) handle_receive(mesg *Message) {
 	NE := srv.filter_log(&mesg.NP, srv.site_id)
 	for idx, elem := range NE {
-		elem.LogIndex += len(srv.record.PartialLog)
+		elem.LogIndex += srv.record.TotalLogLen
 		NE[idx] = elem
 	}
 	srv.record.Dictionary = srv.filtered_dictionary(&NE)
@@ -722,6 +736,7 @@ func (srv *Server) handle_receive(mesg *Message) {
 	// pruned, deletable := srv.prune_log(&NE)
 
 	srv.record.PartialLog = merge_log(&srv.record.PartialLog, &NE)
+	srv.record.TotalLogLen += len(NE)
 	for _, entry := range srv.record.PartialLog {
 		_, exists := srv.record.Dictionary[entry.Name]
 		if exists && entry.Type == logCancel {
