@@ -556,21 +556,12 @@ func compare_log_entry(a *LogEntry, b *LogEntry) bool {
 }
 
 func merge_log(a *[]LogEntry, b *[]LogEntry) []LogEntry {
-	i := 0
-	j := 0
-	n := len(*a)
-	m := len(*b)
-
-	res := make([]LogEntry, n+m)
-	for i < n || j < m {
-		if j >= m || (i < n && compare_log_entry(&(*a)[i], &(*b)[j])) {
-			res[i+j] = (*a)[i]
-			i++
-		} else {
-			res[i+j] = (*b)[j]
-			j++
-		}
-	}
+	res := make([]LogEntry, 0)
+	res = append(res, *a...)
+	res = append(res, *b...)
+	sort.Slice(res, func(i, j int) bool {
+		return compare_log_entry(&res[i], &res[j])
+	})
 	return res
 }
 
@@ -630,8 +621,13 @@ func subtract_amounts(inventory [4]int, amounts [4]int) ([4]int, bool) {
 	return inventory, ok
 }
 
-func fill_precedent(a *LogEntry, b *LogEntry) {
-
+// check if event a and event b are concurrent,
+// and a's customer_name is lexicographically lower than
+// b's customer_name
+func concurrent_precedent(a *LogEntry, b *LogEntry) bool {
+	return !compare_vector_clock(&a.VectorTime, &b.VectorTime) &&
+		!compare_vector_clock(&b.VectorTime, &a.VectorTime) &&
+		a.Name < b.Name
 }
 
 // check the fill condition for a particular log entry
@@ -644,8 +640,8 @@ func fill_precedent(a *LogEntry, b *LogEntry) {
 //    fill all non-canceled insert events before it
 //    where they are considered to be ordered first by
 //    causal order, and second by lexicographical order
-//    of the site it was made on for concurrent events
-func (srv *Server) can_fill(order_event *LogEntry, event_idx int) bool {
+//    of customer_name for concurrent events
+func (srv *Server) can_fill(order_event *LogEntry) bool {
 	_, exists := srv.record.Dictionary[order_event.Name]
 	if !(exists && order_event.Type == logOrder &&
 		srv.can_delete_event(order_event)) {
@@ -656,9 +652,9 @@ func (srv *Server) can_fill(order_event *LogEntry, event_idx int) bool {
 	if !ok {
 		return false
 	}
-	for idx, entry := range srv.record.PartialLog {
-		if idx >= event_idx {
-			break
+	for _, entry := range srv.record.PartialLog {
+		if !concurrent_precedent(&entry, order_event) {
+			continue
 		}
 		order, exists := srv.record.Dictionary[entry.Name]
 		if exists && entry.Type == logOrder {
@@ -748,7 +744,7 @@ func (srv *Server) handle_receive(mesg *Message) {
 	for {
 		can_continue := false
 		for i, entry := range srv.record.PartialLog {
-			if srv.can_fill(&entry, i) {
+			if srv.can_fill(&entry) {
 				order, _ := srv.record.Dictionary[entry.Name]
 				srv.issue_order(order.Amounts)
 				order.Status = filled
