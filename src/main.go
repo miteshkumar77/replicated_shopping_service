@@ -534,6 +534,8 @@ func (srv *Server) can_delete_event(event *LogEntry) bool {
 	return true
 }
 
+// compare_vector_clock returns true iff vector clock a causally
+// precedes vector clock b
 func compare_vector_clock(a *map[string]int, b *map[string]int) bool {
 	neq := false
 	for k, v := range *a {
@@ -643,6 +645,17 @@ func concurrent_precedent(a *LogEntry, b *LogEntry) bool {
 		a.Name < b.Name
 }
 
+func (srv *Server) delete_causally_precedes(name string, pending_order *LogEntry) bool {
+	for _, entry := range srv.record.PartialLog {
+		if entry.Name == name && entry.Type == logCancel {
+			if compare_vector_clock(&entry.VectorTime, &pending_order.VectorTime) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // check the fill condition for a particular log entry
 // 1. The event has to be an order event
 // 2. The event has to exist in the dictionary
@@ -650,7 +663,7 @@ func concurrent_precedent(a *LogEntry, b *LogEntry) bool {
 // 3. The event has to be deletable from the log
 //  (i.e. it exists in the logs of all other machines)
 // 4. There must be enough resources for it if we were to
-//    fill all non-canceled insert events before it
+//    fill all insert events before it
 //    where they are considered to be ordered first by
 //    causal order, and second by lexicographical order
 //    of customer_name for concurrent events
@@ -666,15 +679,18 @@ func (srv *Server) can_fill(order_event *LogEntry) bool {
 		return false
 	}
 	for _, entry := range srv.record.PartialLog {
+		if entry.Type != logOrder {
+			continue
+		}
 		if !concurrent_precedent(&entry, order_event) {
 			continue
 		}
-		order, exists := srv.record.Dictionary[entry.Name]
-		if exists && entry.Type == logOrder {
-			amounts, ok = subtract_amounts(amounts, order.Amounts)
-			if !ok {
-				return false
-			}
+		if !srv.delete_causally_precedes(entry.Name, order_event) {
+			continue
+		}
+		amounts, ok = subtract_amounts(amounts, entry.Amounts)
+		if !ok {
+			return false
 		}
 	}
 	return true
