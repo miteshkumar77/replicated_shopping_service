@@ -558,6 +558,7 @@ func compare_log_entry(a *LogEntry, b *LogEntry) bool {
 }
 
 func merge_log(a *[]LogEntry, b *[]LogEntry) []LogEntry {
+
 	sort.Slice((*a), func(i, j int) bool {
 		return (*a)[i].LogIndex < (*a)[j].LogIndex
 	})
@@ -572,7 +573,7 @@ func merge_log(a *[]LogEntry, b *[]LogEntry) []LogEntry {
 	}
 
 	for idx, entry := range *b {
-		entry.LogIndex = idx + max_log_idx
+		entry.LogIndex = idx + 1 + max_log_idx
 		(*b)[idx] = entry
 	}
 
@@ -582,6 +583,7 @@ func merge_log(a *[]LogEntry, b *[]LogEntry) []LogEntry {
 	sort.Slice(res, func(i, j int) bool {
 		return compare_log_entry(&res[i], &res[j])
 	})
+
 	return res
 }
 
@@ -646,7 +648,7 @@ func subtract_amounts(inventory [4]int, amounts [4]int) ([4]int, bool) {
 // 1. a -> b (causally precedes)
 // 2. a || b (concurrent) ^ a.Name < b.Name
 func eval_precedent(a *LogEntry, b *LogEntry) bool {
-	return compare_vector_clock(&a.VectorTime, &b.VectorTime) || (!compare_vector_clock(&a.VectorTime, &b.VectorTime) &&
+	return (!compare_vector_clock(&a.VectorTime, &b.VectorTime) &&
 		!compare_vector_clock(&b.VectorTime, &a.VectorTime) &&
 		a.Name < b.Name)
 }
@@ -680,10 +682,6 @@ func (srv *Server) can_fill(order_event *LogEntry) bool {
 
 	order, exists := srv.record.Dictionary[order_event.Name]
 	if !exists {
-		return false
-	}
-
-	if !srv.can_delete_event(order_event) {
 		return false
 	}
 
@@ -780,29 +778,33 @@ func (srv *Server) handle_receive(mesg *Message) {
 	srv.cancel_all()
 
 	for {
-		fillable := make([]LogEntry, 0)
-		for _, entry := range srv.record.PartialLog {
-			if srv.can_fill(&entry) {
-				fillable = append(fillable, entry)
+		can_continue := false
+		for idx, entry := range srv.record.PartialLog {
+			if srv.can_delete_event(&entry) {
+				if srv.can_fill(&entry) {
+					dict_entry, exists := srv.record.Dictionary[entry.Name]
+					if !exists {
+						log.Fatalf("ERROR: fillable order %s is already canceled\n", entry.Name)
+					}
+					dict_entry.Status = filled
+					srv.record.Dictionary[entry.Name] = dict_entry
+					srv.record.Amounts, _ = subtract_amounts(srv.record.Amounts, entry.Amounts)
+				} else if entry.Type == logOrder {
+					srv.handle_cancel(entry.Name)
+				}
+
+				srv.record.PartialLog = append(srv.record.PartialLog[:idx], srv.record.PartialLog[idx+1:]...)
+				can_continue = true
+				break
 			}
 		}
-
-		if len(fillable) == 0 {
+		if can_continue {
+			srv.cancel_all()
+		} else {
 			break
 		}
-
-		for _, fillable_event := range fillable {
-			srv.record.Amounts, _ = subtract_amounts(srv.record.Amounts, fillable_event.Amounts)
-			dict_entry, exists := srv.record.Dictionary[fillable_event.Name]
-			if !exists {
-				log.Fatalf("ERROR: fillable order %s was deleted\n", fillable_event.Name)
-			}
-			dict_entry.Status = filled
-			srv.record.Dictionary[fillable_event.Name] = dict_entry
-			srv.cancel_all()
-		}
 	}
-	srv.record.PartialLog = srv.truncated_log()
+	// srv.record.PartialLog = srv.truncated_log()
 	srv.dump_to_stable_storage()
 }
 
