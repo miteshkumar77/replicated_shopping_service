@@ -756,8 +756,6 @@ func (srv *Server) truncated_log() []LogEntry {
 // 8. Truncate the log
 func (srv *Server) handle_receive(mesg *Message) {
 	fmt.Fprintf(os.Stderr, "Receive from site: %s\n", mesg.Sender)
-	print_clock(mesg.T)
-	print_log(mesg.NP)
 	NE := srv.filter_log(&mesg.NP, srv.site_id)
 	srv.record.Dictionary = srv.filtered_dictionary(&NE)
 	srv.record.Amounts = srv.calc_inventory()
