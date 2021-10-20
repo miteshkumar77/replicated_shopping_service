@@ -15,7 +15,7 @@ import (
 )
 
 // largest udp packet data size
-const max_pkt_size = 1024
+const max_pkt_size = 80000
 
 // largest dictionary+log+clock json dump size
 const max_dump_size = 1000000
@@ -317,11 +317,19 @@ func (srv *Server) handle_order(name string, amounts [4]int) {
 			Time:       srv.curr_time(),
 			Site:       srv.site_id,
 			VectorTime: srv.vector_time(),
-			LogIndex:   len(srv.record.PartialLog)})
+			LogIndex:   get_max_log_idx(&srv.record.PartialLog) + 1})
 
 	srv.dump_to_stable_storage()
 
 	fmt.Fprintf(os.Stdout, "Order submitted for %s.\n", name)
+}
+
+func get_max_log_idx(log *[]LogEntry) int {
+	ans := 0
+	for _, entry := range *log {
+		ans = max(ans, entry.LogIndex)
+	}
+	return ans
 }
 
 // handle_cancel processes a cancel request locally
@@ -345,7 +353,7 @@ func (srv *Server) handle_cancel(name string) {
 			Time:       srv.curr_time(),
 			Site:       srv.site_id,
 			VectorTime: srv.vector_time(),
-			LogIndex:   len(srv.record.PartialLog)})
+			LogIndex:   get_max_log_idx(&srv.record.PartialLog) + 1})
 	delete(srv.record.Dictionary, name)
 	srv.dump_to_stable_storage()
 	fmt.Fprintf(os.Stdout, "Order for %s cancelled.\n", name)
@@ -452,24 +460,44 @@ func (srv *Server) handle_sendall() {
 	}
 }
 
-// handle_list_log handles the 'log' command.
-// Prints out all of the log contents.
-func (srv *Server) handle_list_log() {
+func print_log(log []LogEntry) {
 	indices := make([][2]int, 0)
-	for idx, event := range srv.record.PartialLog {
+	for idx, event := range log {
 		indices = append(indices, [2]int{event.LogIndex, idx})
 	}
 	sort.Slice(indices, func(i, j int) bool {
 		return indices[i][0] < indices[j][0]
 	})
 	for _, pr := range indices {
-		event := srv.record.PartialLog[pr[1]]
+		event := log[pr[1]]
 		if event.Type == logOrder {
 			fmt.Fprintf(os.Stdout, "order %s %s\n",
 				event.Name, amountsStr(event.Amounts))
 		} else {
 			fmt.Fprintf(os.Stdout, "cancel %s\n", event.Name)
 		}
+	}
+
+}
+
+// handle_list_log handles the 'log' command.
+// Prints out all of the log contents.
+func (srv *Server) handle_list_log() {
+	print_log(srv.record.PartialLog)
+}
+
+func print_clock(T map[string]map[string]int) {
+	names := get_sorted_keys_time_vector(&T)
+	clk := make([][]string, len(names))
+	for i, site_i := range names {
+		clk[i] = make([]string, len(names))
+		for j, site_j := range names {
+			clk[i][j] = fmt.Sprintf("%d",
+				T[site_i][site_j])
+		}
+	}
+	for _, row := range clk {
+		fmt.Fprintln(os.Stdout, strings.Join(row, " "))
 	}
 }
 
@@ -479,18 +507,7 @@ func (srv *Server) handle_list_log() {
 // site_i = sites[i], site_j = sites[j] and sites is
 // an array of N sites ordered lexicographically.
 func (srv *Server) handle_list_clock() {
-	names := get_sorted_keys_time_vector(&srv.record.TimeVector)
-	clk := make([][]string, len(names))
-	for i, site_i := range names {
-		clk[i] = make([]string, len(names))
-		for j, site_j := range names {
-			clk[i][j] = fmt.Sprintf("%d",
-				srv.record.TimeVector[site_i][site_j])
-		}
-	}
-	for _, row := range clk {
-		fmt.Fprintln(os.Stdout, strings.Join(row, " "))
-	}
+	print_clock(srv.record.TimeVector)
 }
 
 // filtered_dictionary takes a Log that is meant to be
@@ -749,6 +766,9 @@ func (srv *Server) truncated_log() []LogEntry {
 //      on this site, if applied alone
 // 8. Truncate the log
 func (srv *Server) handle_receive(mesg *Message) {
+	fmt.Fprintf(os.Stderr, "Receive from site: %s\n", mesg.Sender)
+	print_clock(mesg.T)
+	print_log(mesg.NP)
 	NE := srv.filter_log(&mesg.NP, srv.site_id)
 	srv.record.Dictionary = srv.filtered_dictionary(&NE)
 	srv.record.Amounts = srv.calc_inventory()
@@ -781,16 +801,18 @@ func (srv *Server) handle_receive(mesg *Message) {
 		can_continue := false
 		for idx, entry := range srv.record.PartialLog {
 			if srv.can_delete_event(&entry) {
-				if srv.can_fill(&entry) {
-					dict_entry, exists := srv.record.Dictionary[entry.Name]
-					if !exists {
-						log.Fatalf("ERROR: fillable order %s is already canceled\n", entry.Name)
+				dict_entry, exists := srv.record.Dictionary[entry.Name]
+				if exists && dict_entry.Status != filled {
+					if srv.can_fill(&entry) {
+						if !exists {
+							log.Fatalf("ERROR: fillable order %s is already canceled\n", entry.Name)
+						}
+						dict_entry.Status = filled
+						srv.record.Dictionary[entry.Name] = dict_entry
+						srv.record.Amounts, _ = subtract_amounts(srv.record.Amounts, entry.Amounts)
+					} else if entry.Type == logOrder {
+						srv.handle_cancel(entry.Name)
 					}
-					dict_entry.Status = filled
-					srv.record.Dictionary[entry.Name] = dict_entry
-					srv.record.Amounts, _ = subtract_amounts(srv.record.Amounts, entry.Amounts)
-				} else if entry.Type == logOrder {
-					srv.handle_cancel(entry.Name)
 				}
 
 				srv.record.PartialLog = append(srv.record.PartialLog[:idx], srv.record.PartialLog[idx+1:]...)
