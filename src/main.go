@@ -670,17 +670,6 @@ func eval_precedent(a *LogEntry, b *LogEntry) bool {
 		a.Name < b.Name)
 }
 
-func (srv *Server) delete_causally_precedes(name string, pending_order *LogEntry) bool {
-	for _, entry := range srv.record.PartialLog {
-		if entry.Name == name && entry.Type == logCancel {
-			if compare_vector_clock(&entry.VectorTime, &pending_order.VectorTime) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // check the fill condition for a particular log entry
 // 1. The event has to be an order event
 // 2. The event has to exist in the dictionary
