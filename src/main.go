@@ -341,7 +341,7 @@ func (srv *Server) handle_cancel(name string) {
 		LogEntry{
 			Type:       logCancel,
 			Name:       name,
-			Amounts:    [4]int{-1, -1, -1, -1},
+			Amounts:    srv.record.Dictionary[name].Amounts,
 			Time:       srv.curr_time(),
 			Site:       srv.site_id,
 			VectorTime: srv.vector_time(),
@@ -547,9 +547,14 @@ func compare_vector_clock(a *map[string]int, b *map[string]int) bool {
 	return neq
 }
 
+// order the log with regards to the tie-breaking rule:
+// first by the happens before relation then by the
+// lexicographical order of the name
 func compare_log_entry(a *LogEntry, b *LogEntry) bool {
+
 	return compare_vector_clock(&a.VectorTime, &b.VectorTime) ||
-		(!compare_vector_clock(&b.VectorTime, &a.VectorTime) && a.Name < b.Name)
+		((!compare_vector_clock(&b.VectorTime, &a.VectorTime) &&
+			!compare_vector_clock(&a.VectorTime, &b.VectorTime)) && a.Name < b.Name)
 }
 
 func merge_log(a *[]LogEntry, b *[]LogEntry) []LogEntry {
@@ -616,8 +621,8 @@ func max(a int, b int) int {
 func (srv *Server) cancel_all() {
 	to_cancel := make(map[string]bool)
 	for _, entry := range srv.record.PartialLog {
-		_, entryExists := srv.record.Dictionary[entry.Name]
-		if entryExists && entry.Type == logOrder &&
+		dict_entry, entryExists := srv.record.Dictionary[entry.Name]
+		if dict_entry.Status != filled && entryExists && entry.Type == logOrder &&
 			!srv.sufficient_resources(entry.Amounts) {
 			to_cancel[entry.Name] = true
 		}
@@ -636,13 +641,14 @@ func subtract_amounts(inventory [4]int, amounts [4]int) ([4]int, bool) {
 	return inventory, ok
 }
 
-// check if event a and event b are concurrent,
-// and a's customer_name is lexicographically lower than
-// b's customer_name
-func concurrent_precedent(a *LogEntry, b *LogEntry) bool {
-	return !compare_vector_clock(&a.VectorTime, &b.VectorTime) &&
+// check if event a must be evaluated before event b,
+// equivalently, check if atleast one of the following conditions hold
+// 1. a -> b (causally precedes)
+// 2. a || b (concurrent) ^ a.Name < b.Name
+func eval_precedent(a *LogEntry, b *LogEntry) bool {
+	return compare_vector_clock(&a.VectorTime, &b.VectorTime) || (!compare_vector_clock(&a.VectorTime, &b.VectorTime) &&
 		!compare_vector_clock(&b.VectorTime, &a.VectorTime) &&
-		a.Name < b.Name
+		a.Name < b.Name)
 }
 
 func (srv *Server) delete_causally_precedes(name string, pending_order *LogEntry) bool {
@@ -668,32 +674,41 @@ func (srv *Server) delete_causally_precedes(name string, pending_order *LogEntry
 //    causal order, and second by lexicographical order
 //    of customer_name for concurrent events
 func (srv *Server) can_fill(order_event *LogEntry) bool {
-	_, exists := srv.record.Dictionary[order_event.Name]
-	if !(exists && order_event.Type == logOrder &&
-		srv.can_delete_event(order_event)) {
+	if order_event.Type != logOrder {
 		return false
 	}
 
-	amounts, ok := subtract_amounts(srv.calc_inventory(), order_event.Amounts)
-	if !ok {
+	order, exists := srv.record.Dictionary[order_event.Name]
+	if !exists {
 		return false
 	}
-	for _, entry := range srv.record.PartialLog {
-		if entry.Type != logOrder {
-			continue
-		}
-		if !concurrent_precedent(&entry, order_event) {
-			continue
-		}
-		if !srv.delete_causally_precedes(entry.Name, order_event) {
-			continue
-		}
-		amounts, ok = subtract_amounts(amounts, entry.Amounts)
-		if !ok {
-			return false
+
+	if !srv.can_delete_event(order_event) {
+		return false
+	}
+
+	canceled := make(map[string]bool)
+	test_inventory := srv.calc_inventory()
+
+	for _, precedent_event := range srv.record.PartialLog {
+		if eval_precedent(&precedent_event, order_event) {
+			_, precedent_cancel_exists := canceled[precedent_event.Name]
+			if precedent_event.Type == logCancel && !precedent_cancel_exists {
+				for i := 0; i < 4; i++ {
+					test_inventory[i] += precedent_event.Amounts[i]
+				}
+				canceled[precedent_event.Name] = true
+			} else {
+				tmp, ok := subtract_amounts(test_inventory, precedent_event.Amounts)
+				test_inventory = tmp
+				if !ok {
+					return false
+				}
+			}
 		}
 	}
-	return true
+	test_inventory, ok := subtract_amounts(test_inventory, order.Amounts)
+	return ok
 }
 
 // return the server's truncated log
@@ -763,30 +778,28 @@ func (srv *Server) handle_receive(mesg *Message) {
 	}
 
 	srv.cancel_all()
+
 	for {
-		can_continue := false
-		for i, entry := range srv.record.PartialLog {
+		fillable := make([]LogEntry, 0)
+		for _, entry := range srv.record.PartialLog {
 			if srv.can_fill(&entry) {
-				order, _ := srv.record.Dictionary[entry.Name]
-				srv.issue_order(order.Amounts)
-				order.Status = filled
-				srv.record.Dictionary[entry.Name] = order
-				can_continue = true
-			}
-			if srv.can_delete_event(&entry) {
-				srv.record.PartialLog =
-					append(srv.record.PartialLog[0:i],
-						srv.record.PartialLog[i+1:]...)
-				can_continue = true
-			}
-			if can_continue {
-				break
+				fillable = append(fillable, entry)
 			}
 		}
-		if can_continue {
-			srv.cancel_all()
-		} else {
+
+		if len(fillable) == 0 {
 			break
+		}
+
+		for _, fillable_event := range fillable {
+			srv.record.Amounts, _ = subtract_amounts(srv.record.Amounts, fillable_event.Amounts)
+			dict_entry, exists := srv.record.Dictionary[fillable_event.Name]
+			if !exists {
+				log.Fatalf("ERROR: fillable order %s was deleted\n", fillable_event.Name)
+			}
+			dict_entry.Status = filled
+			srv.record.Dictionary[fillable_event.Name] = dict_entry
+			srv.cancel_all()
 		}
 	}
 	srv.record.PartialLog = srv.truncated_log()
