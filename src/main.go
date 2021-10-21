@@ -204,7 +204,7 @@ func stdin_read_loop(stdin_c chan string, reader *bufio.Reader) {
 		n, err := reader.Read(b)
 		if err != nil {
 			if err != io.EOF {
-				log.Fatalf("Read error: %v\n", err)
+				fmt.Fprintf(os.Stderr, "Read error: %v\n", err)
 			}
 			break
 		}
@@ -222,7 +222,7 @@ func netwk_read_loop(netwk_c chan Message, reader *net.UDPConn) {
 		n, err := reader.Read(b)
 		if err != nil {
 			if err != io.EOF {
-				log.Fatalf("Read error: %v\n", err)
+				fmt.Fprintf(os.Stderr, "Read error: %v\n", err)
 			}
 			break
 		}
@@ -742,18 +742,25 @@ func (srv *Server) truncated_log() []LogEntry {
 //    lexicographical order for concurrent events
 // 6. Cancel any events that would create a negative balance
 //    on this site, if applied alone
-// 7. Loop
-//      flag = false
-//		Iterate through each event e in the partial log
-//      	If e is fillable then fill e and set flag to true
-//      	If e is deletable from the log, then delete it ans set flag to true
-//			if flag is true
-//   			break from iteration
-//      if flag is false
-//      	break from loop
-//      Cancel any events that would create a negative balance
-//      on this site, if applied alone
-// 8. Truncate the log
+/* Loop
+	Flag = false
+ 	for each event e in the log
+ 		if e is log truncatable:
+			if e is an order x, and x is in the dictionary:
+				if can_fill(e) is true:
+					fill order e
+				otherwise:
+					cancel order e
+			remove e from the log
+			set Flag to true
+			break
+
+	if Flag is true
+		Cancel any events that would create a negative balance on this site,
+		if applied alone
+	else:
+		break
+*/
 func (srv *Server) handle_receive(mesg *Message) {
 	fmt.Fprintf(os.Stderr, "Receive from site: %s\n", mesg.Sender)
 	NE := srv.filter_log(&mesg.NP, srv.site_id)
@@ -791,9 +798,6 @@ func (srv *Server) handle_receive(mesg *Message) {
 				dict_entry, exists := srv.record.Dictionary[entry.Name]
 				if exists && dict_entry.Status != filled {
 					if srv.can_fill(&entry) {
-						if !exists {
-							log.Fatalf("ERROR: fillable order %s is already canceled\n", entry.Name)
-						}
 						dict_entry.Status = filled
 						srv.record.Dictionary[entry.Name] = dict_entry
 						srv.record.Amounts, _ = subtract_amounts(srv.record.Amounts, entry.Amounts)
@@ -813,7 +817,6 @@ func (srv *Server) handle_receive(mesg *Message) {
 			break
 		}
 	}
-	// srv.record.PartialLog = srv.truncated_log()
 	srv.dump_to_stable_storage()
 }
 
@@ -821,16 +824,16 @@ func (srv *Server) dump_to_stable_storage() {
 	record_file, err := os.OpenFile("stable_storage.json",
 		os.O_TRUNC|os.O_WRONLY, os.ModeAppend)
 	if err != nil {
-		log.Fatalf("stable_storage.json open error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "stable_storage.json open error: %v\n", err)
 	}
 
 	b, err := json.Marshal(&srv.record)
 	if err != nil {
-		log.Fatalf("server record marshal error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "server record marshal error: %v\n", err)
 	}
 	_, err = record_file.Write(b)
 	if err != nil {
-		log.Fatalf("stable_storage.json write error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "stable_storage.json write error: %v\n", err)
 	}
 	record_file.Close()
 }
@@ -924,7 +927,7 @@ func (srv *Server) run() {
 	stdin_reader := bufio.NewReader(os.Stdin)
 	ser, err := net.ListenUDP("udp", srv.peer_addrs[srv.site_id])
 	if err != nil {
-		log.Fatalf("ListenUDP error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "ListenUDP error: %v\n", err)
 	}
 
 	go stdin_read_loop(srv.stdin_c, stdin_reader)
